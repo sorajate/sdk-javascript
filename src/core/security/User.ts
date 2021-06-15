@@ -5,11 +5,19 @@ export class User {
   /**
    * Kuid (Kuzzle unique ID)
    */
-  public _id: string;
+  _id: string;
+
   /**
-   * Custom content
+   * User content
    */
-  public content: JSONObject;
+  _source: JSONObject;
+
+  /**
+   * User content
+   *
+   * @deprecated Use User._source instead
+   */
+  content: JSONObject
 
   private _kuzzle: any;
 
@@ -23,8 +31,15 @@ export class User {
       value: kuzzle
     });
 
+    Reflect.defineProperty(this, 'content', {
+      enumerable: true,
+      get () {
+        return this._source;
+      }
+    });
+
     this._id = _id;
-    this.content = content;
+    this._source = content;
   }
 
   private get kuzzle () {
@@ -35,7 +50,7 @@ export class User {
    * Array of profile IDs
    */
   get profileIds (): Array<string> {
-    return this.content.profileIds || [];
+    return this._source.profileIds || [];
   }
 
   /**
@@ -49,6 +64,15 @@ export class User {
     return this.kuzzle.security.mGetProfiles(this.profileIds);
   }
 
+  /**
+   * Serialize the instance
+   */
+  serialize (): JSONObject {
+    return {
+      _id: this._id,
+      _source: this._source,
+    };
+  }
 }
 
 module.exports = { User };

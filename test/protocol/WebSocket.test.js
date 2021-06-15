@@ -5,6 +5,8 @@ const NodeWS = require('ws');
 
 const { default: WS } = require('../../src/protocols/WebSocket');
 const windowMock = require('../mocks/window.mock');
+const { default: HttpProtocol } = require('../../src/protocols/Http');
+const DisconnectionOrigin = require('../../src/protocols/DisconnectionOrigin');
 
 describe('WebSocket networking module', () => {
   let
@@ -99,6 +101,16 @@ describe('WebSocket networking module', () => {
     should(websocket.stopRetryingToConnect).be.false();
   });
 
+  it('should initialize a ping interval when the connection is established', () => {
+    const setInterval = sinon.stub(clock, 'setInterval');
+
+    websocket.connect();
+    clientStub.onopen();
+
+    should(setInterval)
+      .be.calledOnce();
+  });
+
   it('should call listeners on a "reconnect" event', () => {
     const cb = sinon.stub();
 
@@ -117,6 +129,46 @@ describe('WebSocket networking module', () => {
     should(cb).be.calledOnce();
   });
 
+  it('should clear pongTimeout and pingInterval on a networkError', () => {
+    const cb = sinon.stub();
+    const clearTimeout = sinon.stub(clock, 'clearTimeout');
+    const clearInterval = sinon.stub(clock, 'clearInterval');
+    
+    websocket.retrying = false;
+    websocket.addListener('networkError', cb);
+    should(websocket.listeners('networkError').length).be.eql(1);
+
+    websocket.connect();
+    websocket.connect = sinon.stub().rejects();
+    clientStub.onopen();
+    clientStub.onerror();
+    should(clearTimeout)
+      .be.calledOnce();
+    should(clearInterval)
+      .be.calledOnce();
+  });
+
+  it('should clear pongTimeout and pingInterval when the connection closes', () => {
+    const cb = sinon.stub();
+    const clearTimeout = sinon.stub(clock, 'clearTimeout');
+    const clearInterval = sinon.stub(clock, 'clearInterval');
+    
+    websocket.retrying = false;
+    websocket.addListener('disconnect', cb);
+    should(websocket.listeners('disconnect').length).be.eql(1);
+
+    websocket.connect();
+    websocket.connect = sinon.stub().resolves();
+    clientStub.onopen();
+    clientStub.onclose(1000);
+    should(cb).be.calledOnce().and.be.calledWith({origin: DisconnectionOrigin.USER_CONNECTION_CLOSED });
+    websocket.close();
+    should(clearTimeout)
+      .be.calledOnce();
+    should(clearInterval)
+      .be.calledOnce();
+  });
+  
   it('should try to reconnect on a connection error with autoReconnect = true', () => {
     const cb = sinon.stub();
 
@@ -138,6 +190,7 @@ describe('WebSocket networking module', () => {
 
   it('should not try to reconnect on a connection error with autoReconnect = false', () => {
     const cb = sinon.stub();
+    const disconnectCB = sinon.stub();
 
     websocket = new WS('address', {
       port: 1234,
@@ -146,6 +199,7 @@ describe('WebSocket networking module', () => {
     });
 
     websocket.retrying = false;
+    websocket.addListener('disconnect', disconnectCB);
     websocket.addListener('networkError', cb);
     should(websocket.listeners('networkError').length).be.eql(1);
 
@@ -155,6 +209,7 @@ describe('WebSocket networking module', () => {
     clock.tick(10);
 
     should(cb).be.calledOnce();
+    should(disconnectCB).be.calledOnce().and.be.calledWith({ origin: DisconnectionOrigin.NETWORK_ERROR });
     should(websocket.retrying).be.false();
     should(websocket.connect).not.be.called();
 
@@ -226,7 +281,7 @@ describe('WebSocket networking module', () => {
     clientStub.onclose(1000);
 
     clock.tick(10);
-    should(cb).be.calledOnce();
+    should(cb).be.calledOnce().and.be.calledWith({ origin: DisconnectionOrigin.USER_CONNECTION_CLOSED });
     should(websocket.listeners('disconnect').length).be.eql(1);
     websocket.clear.should.be.calledOnce();
   });
@@ -313,23 +368,49 @@ describe('WebSocket networking module', () => {
 
     let expectedError;
     websocket.on('discarded', cb);
-    websocket.on('queryError', (error, data) => {
+    websocket.on('queryError', ({ error, request }) => {
       expectedError = error;
-      cb2(error, data);
+      cb2(error, request);
     });
     websocket.connect();
 
     const payload = { result: null, error: { message: 'Malformed request' } };
-
+    const clearTimeout = sinon.stub(clock, 'clearTimeout');
     clientStub.onmessage({data: JSON.stringify(payload)});
     clock.tick(10);
 
+    should(clearTimeout)
+      .be.calledOnce();
     should(cb)
       .be.calledOnce()
       .be.calledWithMatch(payload);
     should(cb2)
       .be.calledOnce()
       .be.calledWithMatch(expectedError, payload);
+  });
+
+  it('should clear the pongTimeOut when receiving a pong message and return', () => {
+    const
+      cb = sinon.stub(),
+      cb2 = sinon.stub();
+
+    websocket.on('discarded', cb);
+    websocket.on('queryError', (error, data) => {
+      cb2(error, data);
+    });
+    
+    websocket.connect();
+    
+    const clearTimeout = sinon.stub(clock, 'clearTimeout');
+    
+    clientStub.onmessage({data: JSON.stringify({ p: 2 })});
+    
+    should(clearTimeout)
+      .be.calledOnce();
+    should(cb)
+      .be.not.calledOnce();
+    should(cb2)
+      .be.not.calledOnce();
   });
 
   it('should be able to unregister a callback on an event', () => {
@@ -433,6 +514,30 @@ describe('WebSocket networking module', () => {
       });
   });
 
+  describe('#connect', () => {
+    it('connect should call the connect method of the HttpProtocol when cookieSupport is true', async () => {
+      websocket._cookieSupport = true;
+      websocket._httpProtocol = {
+        connect: sinon.stub().resolves()
+      };
+      websocket._connect = sinon.stub().resolves();
+      await websocket.connect();
+      await should(websocket._httpProtocol.connect).be.called();
+      await should(websocket._connect).be.called();
+    });
+
+    it('connect should not call the connect method of the HttpProtocol when cookieSupport is false', async () => {
+      websocket._cookieSupport = false;
+      websocket._httpProtocol = {
+        connect: sinon.stub().resolves()
+      };
+      websocket._connect = sinon.stub().resolves();
+      await websocket.connect();
+      await should(websocket._httpProtocol.connect).not.be.called();
+      await should(websocket._connect).be.called();
+    });
+  });
+
   describe('#constructor', () => {
     it('should throw if an invalid host is provided', () => {
       const invalidHosts = [undefined, null, 123, false, true, [], {}, ''];
@@ -493,6 +598,143 @@ describe('WebSocket networking module', () => {
 
       for (const headers of invalidHeaders) {
         should(() => new WS('foobar', {headers})).throw(Error, {message: 'Invalid "headers" option: expected an object'});
+      }
+    });
+  });
+
+  describe('#enableCookieSupport', function() {
+    let enableCookieFunc;
+    before(() => {
+      enableCookieFunc = async function () {
+        websocket.enableCookieSupport();
+      };
+    });
+
+    afterEach(() => {
+      /* eslint-disable no-native-reassign */
+      /* eslint-disable no-global-assign */
+      XMLHttpRequest = undefined;
+    });
+
+    it('should throw when enabling cookie support outside of a browser', async () => {
+      await should(enableCookieFunc()).be.rejected();
+      await should(websocket.cookieSupport).be.false();
+      await should(websocket._httpProtocol).be.undefined();
+    });
+
+    it('should set cookieSupport to true and construct the HttpProtocol', async () => {
+      /* eslint-disable no-native-reassign */
+      /* eslint-disable no-global-assign */
+      XMLHttpRequest = () => {};
+      await should(enableCookieFunc()).not.be.rejectedWith();
+      await should(websocket.cookieSupport).be.true();
+      await should(websocket._httpProtocol).not.be.undefined().and.be.an.instanceof(HttpProtocol);
+      await should(websocket._httpProtocol.host).be.equal(websocket.host);
+      await should(websocket._httpProtocol.port).be.equal(websocket.port);
+      await should(websocket._httpProtocol.ssl).be.equal(websocket.ssl);
+    });
+  });
+
+  describe('#send', function() {
+
+    let
+      XMLHttpRequestSave,
+      httpProtocolStub;
+    beforeEach(() => {
+
+      XMLHttpRequestSave = XMLHttpRequest;
+
+      httpProtocolStub = {
+        formatRequest: sinon.stub(),
+        _sendHttpRequest: sinon.stub()
+      };
+
+      httpProtocolStub.formatRequest.returns({
+        method: 'foo',
+        path: 'bar',
+        payload: {
+          requestId: 'foobar'
+        }
+      });
+
+      httpProtocolStub._sendHttpRequest.resolves();
+
+      websocket = new WS('address', {
+        port: 1234,
+        autoReconnect: true,
+        reconnectionDelay: 10
+      });
+
+      websocket.connect();
+    });
+
+    afterEach(() => {
+      /* eslint-disable no-native-reassign */
+      /* eslint-disable no-global-assign */
+      XMLHttpRequest = XMLHttpRequestSave;
+    });
+
+    it('should send request using websocket client when support for cookie authentication is disabled', async () => {
+      for (let action of ['login', 'logout', 'refreshToken']) {
+        clientStub.send.resetHistory();
+
+        const request = {
+          controller: 'auth',
+          action,
+        };
+
+        await websocket.send(request);
+        await should(clientStub.send).be.calledOnce().and.calledWithMatch(JSON.stringify(request));
+      }
+    });
+
+    it('should send request using http protocol when support for cookie authentication is enabled', async () => {
+      /* eslint-disable no-native-reassign */
+      /* eslint-disable no-global-assign */
+      XMLHttpRequest = () => {}; // Define XMLHttpRequest to fake being in a browser
+      websocket.enableCookieSupport();
+      websocket._httpProtocol = httpProtocolStub;
+      
+      websocket.connect = sinon.stub().resolves();
+      websocket.clientDisconnected = sinon.stub().resolves();
+      const onRenewalStart = sinon.stub();
+      const onRenewalDone = sinon.stub();
+      websocket.addListener('websocketRenewalStart', onRenewalStart);
+      websocket.addListener('websocketRenewalDone', onRenewalDone);
+
+      for (let action of ['login', 'logout', 'refreshToken']) {
+        clientStub.send.resetHistory();
+        httpProtocolStub.formatRequest.resetHistory();
+        httpProtocolStub._sendHttpRequest.resetHistory();
+        clientStub.close.resetHistory();
+        websocket.connect.resetHistory();
+        websocket.clientDisconnected.resetHistory();
+        onRenewalStart.resetHistory();
+        onRenewalDone.resetHistory();
+        websocket.client = clientStub;
+
+        const request = {
+          controller: 'auth',
+          action,
+        };
+
+        await websocket.send(request);
+        await should(httpProtocolStub.formatRequest).be.calledOnce().and.calledWithMatch(request);
+        await should(httpProtocolStub._sendHttpRequest).be.calledOnce().and.calledWithMatch({
+          method: 'foo',
+          path: 'bar',
+          payload: {
+            requestId: 'foobar'
+          },
+        });
+
+        await should(clientStub.close).be.calledOnce();
+        await should(websocket.clientDisconnected).be.calledOnce().and.calledWith(DisconnectionOrigin.WEBSOCKET_AUTH_RENEWAL);
+        await should(clientStub.send).not.be.called();
+
+        await should(onRenewalStart).be.calledOnce();
+        await should(websocket.connect).be.calledOnce();
+        await should(onRenewalDone).be.calledOnce();
       }
     });
   });

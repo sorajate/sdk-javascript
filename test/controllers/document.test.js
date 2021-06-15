@@ -118,6 +118,36 @@ describe('Document Controller', () => {
     });
   });
 
+  
+  describe('deleteFields', () => {
+    it('should call document/deleteFields query and return a Promise which resolves the updated document', () => {
+      kuzzle.query.resolves({result: {_id: 'document-id', _source: {foo: 'bar'}}});
+      options.silent = true;
+
+      const optionsCopy = Object.assign({}, options);
+      optionsCopy.source = true;
+
+      return kuzzle.document.deleteFields('index', 'collection', 'document-id', ['bar'], optionsCopy)
+        .then(res => {
+          should(kuzzle.query)
+            .be.calledOnce()
+            .be.calledWithMatch({
+              controller: 'document',
+              action: 'deleteFields',
+              index: 'index',
+              collection: 'collection',
+              _id: 'document-id',
+              body: {fields: ['bar']},
+              silent: true,
+              source: true,
+            }, optionsCopy);
+
+          should(res._id).be.equal('document-id');
+          should(res._source.foo).be.equal('bar');
+        });
+    });
+  });
+
   describe('deleteByQuery', () => {
     it('should call document/deleteByQuery query and return a Promise which resolves the list of deleted document ids', () => {
       kuzzle.query.resolves({result: {ids: ['foo', 'bar', 'baz']}});
@@ -418,7 +448,7 @@ describe('Document Controller', () => {
           should(res).be.an.instanceOf(DocumentSearchResult);
           should(res._options).match(options);
           should(res._options.verb).be.eql('POST');
-          should(res._response).be.equal(result);
+          should(res._result).be.equal(result);
           should(res.fetched).be.equal(3);
           should(res.total).be.equal(3);
         });
@@ -457,7 +487,7 @@ describe('Document Controller', () => {
           should(res).be.an.instanceOf(DocumentSearchResult);
           should(res._options).match(options);
           should(res._options.verb).be.eql('GET');
-          should(res._response).be.equal(result);
+          should(res._result).be.equal(result);
           should(res.fetched).be.equal(3);
           should(res.total).be.equal(3);
         });
@@ -492,7 +522,7 @@ describe('Document Controller', () => {
 
           should(res).be.an.instanceOf(DocumentSearchResult);
           should(res._options).match({ verb: 'POST' });
-          should(res._response).be.equal(result);
+          should(res._result).be.equal(result);
           should(res.fetched).be.equal(2);
           should(res.total).be.equal(3);
         });

@@ -11,11 +11,13 @@ import { ServerController } from './controllers/Server';
 import { SecurityController } from './controllers/Security';
 import { MemoryStorageController } from './controllers/MemoryStorage';
 
+import { Deprecation } from './utils/Deprecation';
 import { uuidv4 } from './utils/uuidv4';
 import { proxify } from './utils/proxify';
 import { JSONObject } from './types';
 import { RequestPayload } from './types/RequestPayload';
 import { ResponsePayload } from './types/ResponsePayload';
+import { RequestTimeoutError } from './RequestTimeoutError';
 
 // Defined by webpack plugin
 declare const SDKVERSION: any;
@@ -61,6 +63,10 @@ export class Kuzzle extends KuzzleEventEmitter {
    * Common volatile data that will be sent to all future requests.
    */
   public volatile: JSONObject;
+  /**
+   * Handle deprecation warning in development mode (hidden in production)
+   */
+  public deprecationHandler: Deprecation;
 
   public auth: AuthController;
   public bulk: any;
@@ -82,8 +88,10 @@ export class Kuzzle extends KuzzleEventEmitter {
   private _queueMaxSize: any;
   private _queueTTL: any;
   private _replayInterval: any;
+  private _requestTimeout: number;
   private _tokenExpiredInterval: any;
   private _lastTokenExpired: any;
+  private _cookieAuthentication: boolean;
 
   private __proxy__: any;
 
@@ -156,6 +164,12 @@ export class Kuzzle extends KuzzleEventEmitter {
        */
       replayInterval?: number;
       /**
+       * Time (in ms) during which a request will still be waited to be resolved
+       * Set it to `-1` if you want to wait indefinitely.
+       * Default: `-1`
+       */
+      requestTimeout?: number;
+      /**
        * Time (in ms) during which a TokenExpired event is ignored
        * Default: `1000`
        */
@@ -164,6 +178,17 @@ export class Kuzzle extends KuzzleEventEmitter {
        * If set to `auto`, the `autoQueue` and `autoReplay` are also set to `true`
        */
       offlineMode?: 'auto';
+      /**
+       * If `true` uses cookie to store token
+       * Only supported in a browser
+       * Default: `false`
+       */
+      cookieAuth?: boolean;
+      /**
+       * Show deprecation warning in development mode (hidden either way in production)
+       * Default: `true`
+       */
+      deprecationWarning?: boolean;
     } = {}
   ) {
     super();
@@ -208,6 +233,41 @@ export class Kuzzle extends KuzzleEventEmitter {
       ? options.volatile
       : {};
 
+    this._cookieAuthentication = typeof options.cookieAuth === 'boolean'
+      ? options.cookieAuth
+      : false;
+    
+    if (this._cookieAuthentication) {
+      this.protocol.enableCookieSupport();
+      let autoQueueState;
+      let autoReplayState;
+      let autoResbuscribeState;
+  
+      this.protocol.addListener('websocketRenewalStart', () => {
+        autoQueueState = this.autoQueue;
+        autoReplayState = this.autoReplay;
+        autoResbuscribeState = this.autoResubscribe;
+  
+        this.autoQueue = true;
+        this.autoReplay = true;
+        this.autoResubscribe = true;
+      });
+  
+      this.protocol.addListener('websocketRenewalDone', () => {
+        this.autoQueue = autoQueueState;
+        this.autoReplay = autoReplayState;
+        this.autoResubscribe = autoResbuscribeState;
+      });
+    }
+    
+    this.deprecationHandler = new Deprecation(
+      typeof options.deprecationWarning === 'boolean' ? options.deprecationWarning : true
+    );
+    
+    if (this._cookieAuthentication && typeof XMLHttpRequest === 'undefined') {
+      throw new Error('Support for cookie authentication with cookieAuth option is not supported outside a browser');
+    }
+    
     // controllers
     this.useController(AuthController, 'auth');
     this.useController(BulkController, 'bulk');
@@ -242,6 +302,9 @@ export class Kuzzle extends KuzzleEventEmitter {
     this._replayInterval = typeof options.replayInterval === 'number'
       ? options.replayInterval
       : 10;
+    this._requestTimeout = typeof options.requestTimeout === 'number'
+      ? options.requestTimeout
+      : -1;
     this._tokenExpiredInterval = typeof options.tokenExpiredInterval === 'number'
       ? options.tokenExpiredInterval
       : 1000;
@@ -290,6 +353,10 @@ export class Kuzzle extends KuzzleEventEmitter {
   set autoReplay (value) {
     this._checkPropertyType('_autoReplay', 'boolean', value);
     this._autoReplay = value;
+  }
+
+  get cookieAuthentication () {
+    return this._cookieAuthentication;
   }
 
   get connected () {
@@ -369,6 +436,15 @@ export class Kuzzle extends KuzzleEventEmitter {
     this._replayInterval = value;
   }
 
+  get requestTimeout () {
+    return this._requestTimeout;
+  }
+
+  set requestTimeout (value) {
+    this._checkPropertyType('_requestTimeout', 'number', value);
+    this._requestTimeout = value;
+  }
+
   get sslConnection () {
     return this.protocol.sslConnection;
   }
@@ -420,7 +496,9 @@ export class Kuzzle extends KuzzleEventEmitter {
       this.startQueuing();
     }
 
-    this.protocol.addListener('queryError', (err, query) => this.emit('queryError', err, query));
+    this.protocol.addListener('queryError', ({ error, request }) => {
+      this.emit('queryError', { error, request });
+    });
 
     this.protocol.addListener('tokenExpired', () => this.tokenExpired());
 
@@ -443,8 +521,8 @@ export class Kuzzle extends KuzzleEventEmitter {
       this.emit('networkError', error);
     });
 
-    this.protocol.addListener('disconnect', () => {
-      this.emit('disconnected');
+    this.protocol.addListener('disconnect', context => {
+      this.emit('disconnected', context);
     });
 
     this.protocol.addListener('reconnect', () => {
@@ -454,20 +532,6 @@ export class Kuzzle extends KuzzleEventEmitter {
 
       if (this.autoReplay) {
         this.playQueue();
-      }
-
-      if (this.auth.authenticationToken) {
-        return this.auth.checkToken()
-          .then(res => {
-            // shouldn't obtain an error but let's invalidate the token anyway
-            if (!res.valid) {
-              this.auth.authenticationToken = null;
-            }
-          })
-          .catch(() => {
-            this.auth.authenticationToken = null;
-          })
-          .then(() => this.emit('reconnected'));
       }
 
       this.emit('reconnected');
@@ -523,17 +587,20 @@ export class Kuzzle extends KuzzleEventEmitter {
    *    - volatile (object, default: null):
    *        Additional information passed to notifications to other users
    *
-   * @param request
-   * @param options - Optional arguments
+   * @param req
+   * @param opts - Optional arguments
    */
-  query (request: RequestPayload = {}, options: JSONObject = {}): Promise<ResponsePayload> {
-    if (typeof request !== 'object' || Array.isArray(request)) {
-      throw new Error(`Kuzzle.query: Invalid request: ${JSON.stringify(request)}`);
+  query (req: RequestPayload = {}, opts: JSONObject = {}): Promise<ResponsePayload> {
+    if (typeof req !== 'object' || Array.isArray(req)) {
+      throw new Error(`Kuzzle.query: Invalid request: ${JSON.stringify(req)}`);
     }
 
-    if (typeof options !== 'object' || Array.isArray(options)) {
-      throw new Error(`Kuzzle.query: Invalid "options" argument: ${JSON.stringify(options)}`);
+    if (typeof opts !== 'object' || Array.isArray(opts)) {
+      throw new Error(`Kuzzle.query: Invalid "options" argument: ${JSON.stringify(opts)}`);
     }
+
+    const request = JSON.parse(JSON.stringify(req));
+    const options = JSON.parse(JSON.stringify(opts));
 
     if (!request.requestId) {
       request.requestId = uuidv4();
@@ -576,6 +643,10 @@ export class Kuzzle extends KuzzleEventEmitter {
       queuable = queuable && this.queueFilter(request);
     }
 
+    const requestTimeout = typeof options.timeout === 'number'
+      ? options.timeout
+      : this._requestTimeout;
+
     if (this._queuing) {
       if (queuable) {
         this._cleanQueue();
@@ -585,17 +656,22 @@ export class Kuzzle extends KuzzleEventEmitter {
             resolve,
             reject,
             request,
-            ts: Date.now()
+            ts: Date.now(),
+            timeout: requestTimeout,
           });
         });
       }
 
-      this.emit('discarded', {request});
+      this.emit('discarded', { request });
       return Promise.reject(new Error(`Unable to execute request: not connected to a Kuzzle server.
 Discarded request: ${JSON.stringify(request)}`));
     }
 
-    return this.protocol.query(request, options);
+    return this._timeoutRequest(
+      requestTimeout,
+      request,
+      options
+    ).then((response: ResponsePayload) => this.deprecationHandler.logDeprecation(response));
   }
 
   /**
@@ -723,9 +799,14 @@ Discarded request: ${JSON.stringify(request)}`));
       uniqueQueue = {},
       dequeuingProcess = () => {
         if (this.offlineQueue.length > 0) {
-          this.protocol.query(this.offlineQueue[0].request)
+          
+          this._timeoutRequest(
+            this.offlineQueue[0].timeout,
+            this.offlineQueue[0].request,
+          )
             .then(this.offlineQueue[0].resolve)
             .catch(this.offlineQueue[0].reject);
+
           this.emit('offlineQueuePop', this.offlineQueue.shift());
 
           setTimeout(() => {
@@ -766,5 +847,31 @@ Discarded request: ${JSON.stringify(request)}`));
     }
 
     dequeuingProcess();
+  }
+
+  /**
+   * Sends a request with a timeout
+   * 
+   * @param delay Delay before the request is rejected if not resolved
+   * @param request Request object
+   * @param options Request options
+   * @returns Resolved request or a TimedOutError
+   */
+  private _timeoutRequest(delay: number, request: RequestPayload, options: JSONObject = {}) {
+    // No timeout
+    if (delay === -1) {
+      return this.protocol.query(request, options);
+    }
+
+    const timeout = new Promise((resolve, reject) => {
+      setTimeout(() => {
+        reject(new RequestTimeoutError(request, delay));
+      }, delay);
+    });
+
+    return Promise.race([
+      timeout,
+      this.protocol.query(request, options)
+    ]);
   }
 }

@@ -24,19 +24,20 @@ refreshToken ([options])
 
 <br/>
 
-| Arguments    | Type    | Description |
-|--------------|---------|-------------|
-| `options`  | <pre>object</pre> | Query options |
+| Arguments | Type              | Description   |
+| --------- | ----------------- | ------------- |
+| `options` | <pre>object</pre> | Query options |
 
 
 ### options
 
 Additional query options
 
-| Property     | Type<br/>(default)    | Description   |
-| -------------- | --------- | ------------- |
-| `expiresIn` | <pre>string</pre> | Expiration time in [ms library](https://www.npmjs.com/package/ms) format. (e.g. `2h`) |
-| `queuable` | <pre>boolean</pre><br/>(`true`)| If true, queues the request during downtime, until connected to Kuzzle again |
+| Property    | Type<br/>(default)              | Description                                                                                                           |
+| ----------- | ------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `expiresIn` | <pre>string</pre>               | Expiration time in [ms library](https://www.npmjs.com/package/ms) format. (e.g. `2h`)                                 |
+| `queuable`  | <pre>boolean</pre><br/>(`true`) | If true, queues the request during downtime, until connected to Kuzzle again                                          |
+| [`timeout`](/sdk/7/core-classes/kuzzle/query#timeout)   | <pre>number</pre><br/>(`-1`)    | Time (in ms) during which a request will still be waited to be resolved. Set it `-1` if you want to wait indefinitely |
 
 ### expiresIn
 
@@ -46,12 +47,12 @@ The default value for the `expiresIn` option is defined at server level, in Kuzz
 
 The `refreshToken` action resolves to a token object with the following properties:
 
-| Property   | Type    | Description  |
-|--------------|---------|-------------|
-| `_id` | <pre>string</pre> | User unique identifier ([kuid](/core/2/guides/main-concepts/authentication#kuzzle-user-identifier-kuid)) |
-| `expiresAt` | <pre>number</pre> | Expiration timestamp in Epoch-millis format (UTC) |
-| `jwt` | <pre>string</pre> | Authentication token |
-| `ttl` | <pre>number</pre> | Time to live of the authentication token, in milliseconds |
+| Property    | Type              | Description                                                                                                                                                              |
+| ----------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `_id`       | <pre>string</pre> | User unique identifier ([kuid](/core/2/guides/main-concepts/authentication#kuzzle-user-identifier-kuid))                                                                 |
+| `expiresAt` | <pre>number</pre> | Expiration timestamp in Epoch-millis format (UTC)                                                                                                                        |
+| `jwt`       | <pre>string</pre> | Authentication token (returned only if the option [cookieAuth](/sdk/js/7/core-classes/kuzzle/constructor) is not enabled in the SDK, otherwise stored in an http cookie) |
+| `ttl`       | <pre>number</pre> | Time to live of the authentication token, in milliseconds                                                                                                                |
 
 ## Usage
 

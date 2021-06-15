@@ -1,6 +1,7 @@
 'use strict';
 
 import { KuzzleAbstractProtocol } from './Base';
+import * as DisconnectionOrigin from '../DisconnectionOrigin';
 
 export abstract class BaseProtocolRealtime extends KuzzleAbstractProtocol {
   protected _autoReconnect: boolean;
@@ -46,14 +47,17 @@ export abstract class BaseProtocolRealtime extends KuzzleAbstractProtocol {
     this.state = 'connected';
     this.wasConnected = true;
     this.stopRetryingToConnect = false;
+
   }
 
   /**
    * Called when the client's connection is closed
+   * 
+   * @param {string} origin String that describe what is causing the disconnection
    */
-  clientDisconnected () {
+  clientDisconnected (origin: string) {
     this.clear();
-    this.emit('disconnect');
+    this.emit('disconnect', { origin });
   }
 
   /**
@@ -92,7 +96,7 @@ export abstract class BaseProtocolRealtime extends KuzzleAbstractProtocol {
       }, this.reconnectionDelay);
     }
     else {
-      this.emit('disconnect');
+      this.emit('disconnect', { origin: DisconnectionOrigin.NETWORK_ERROR });
     }
   }
 
